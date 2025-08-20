@@ -509,7 +509,10 @@ def match_poi_to_40S(
         datadict_40S: dict[str, pd.DataFrame], 
         peaks_60S: dict[str, pd.DataFrame],
         ) -> pd.DataFrame:
-    """Matches protein of interest peaks to 40S "rotation state" (axis-wise), generates overlap pie chart, and returns dataframe with log2 ratio and rotation-state
+    """Matches protein of interest peaks to 40S rotation.
+
+    Matches protein of interest peaks to 40S "rotation state" (axis-wise), 
+    and returns dataframe with log2 ratio and rotation-state
     
     Parameters:
     -----------
@@ -555,17 +558,45 @@ def match_poi_to_40S(
     out_df = out_df.where(pd.notnull(out_df), False)
     return out_df
 
-def make_autopct(values):
+def make_autopct(values: list) -> Callable:
+    """Generates text to put on the pie chart with absolute numbers and percents
+    
+    Parameters:
+    -----------
+    values: list
+    the values used to produce percents
+
+    Returns:
+    --------
+    my_autopct: Callable
+    function that will use the percents passed into the pie chart and display absolute numbers
+    """
     def my_autopct(pct):
         total = sum(values)
         val = int(round(pct*total/100.0))
         return '{p:.2f}% ({v:d})'.format(p=pct,v=val)
     return my_autopct
 
-def plot_overlaps(all_data_dict, title):
-    all_peaks = set(all_data_dict["index_combo"])
-    all_40S = set(all_data_dict[all_data_dict["best_axis"] != False]["index_combo"])
-    all_eEF2 = set(all_data_dict[all_data_dict["contains_eEF2"] != False]["index_combo"])
+def plot_overlaps(
+        all_data_df: pd.DataFrame, 
+        title: str
+        ) -> None:
+    """Plots pie charts of the overlap between eEF2 and 40S.
+
+    Parameters:
+    -----------
+    all_data_df: pd.DataFrame
+    DataFrame that contains the (index, image) combo and a best-axis and contains_eEF2 column
+    title: str
+    What to title the plot
+
+    Returns:
+    --------
+    None
+    """
+    all_peaks = set(all_data_df["index_combo"])
+    all_40S = set(all_data_df[all_data_df["best_axis"] != False]["index_combo"])
+    all_eEF2 = set(all_data_df[all_data_df["contains_eEF2"] != False]["index_combo"])
     eEF2_and_40S = all_eEF2 & all_40S
     eEF2_no_40S = all_eEF2 - all_40S
     no_eEF2_40S = all_40S - all_eEF2
