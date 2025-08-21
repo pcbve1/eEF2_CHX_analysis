@@ -8,12 +8,19 @@ from scipy.spatial.transform import Rotation
 import seaborn as sns
 from sklearn.mixture import GaussianMixture
 from scipy.stats import norm
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+import warnings
+warnings.simplefilter(action="ignore", category=FutureWarning) # for the pandas warning.
 
 def testfunc():
     print("YEOOO. this is a TEST!")
 
 def default_filepattern(in_path):
     return in_path.split("_")[2]
+
+def label_to_display(label):
+    spl = label[1:-1].split(", ")
+    return f"{spl[0]} → {spl[1]}"
 
 def make_datadict(
         dir_path: os.PathLike | str, 
@@ -91,7 +98,7 @@ def create_match_stats(
     cols = ["refined_pos_x", "refined_pos_y"]
     rot_distance = (rot2 * rot1.inv()).magnitude() * (180 / np.pi)
     euc_distance = np.linalg.norm(df1[cols].values - df2[cols].values, axis=1)
-    defocus_distance = np.abs(df1["refined_relative_defocus"].values - df2["refined_relative_defocus"].values)
+    defocus_distance = np.abs(np.array(df1["refined_relative_defocus"].values) - np.array(df2["refined_relative_defocus"].values))
     match_stats = pd.DataFrame(
         data=np.column_stack([
             df1["particle_index"],
@@ -241,15 +248,16 @@ def plot_initial_ratios(
     coi = [col for col in log2_ratios.columns if col.startswith("log2")][0]
     poi = coi.split("(")[1].split("/")[0]
     fig, ax = plt.subplots(figsize=(6, 5))
+    data = log2_ratios[coi].to_numpy()
     ax.hist(
-        log2_ratios[coi].values, 
+        data,
         bins=200, 
         color="lightgray",
         density=True, 
         label=f"Peaks (n = {log2_ratios.shape[0]})"
         )
     sns.kdeplot(
-        log2_ratios[coi].values, 
+        data,
         ax=ax, 
         fill=True, 
         color="violet", 
@@ -286,7 +294,7 @@ def select_best_gmm(
     """
     # Reshape data for sklearn (n_samples, n_features)
     coi = [col for col in log2_data.columns if col.startswith("log2")][0]
-    data = log2_data[coi].values.reshape(-1, 1)
+    data = np.array(log2_data[coi].values).reshape(-1, 1) 
     
     aics, bics, models = [], [], []
 
@@ -334,7 +342,7 @@ def fit_gmms_and_likelihoods(
 
     """
     coi = [col for col in log2_data.columns if col.startswith("log2")][0]
-    log2_arr = log2_data[coi].values
+    log2_arr = np.array(log2_data[coi].values)
     data = log2_arr.reshape(-1, 1)
     gmm = GaussianMixture(
         n_components=2,
@@ -351,7 +359,7 @@ def fit_gmms_and_likelihoods(
     pdf = np.exp(logprob)
     axs[0].plot(x, pdf, "k--", label="Mixture PDF")
     # individual components
-    for i, (mean, cov, weight) in enumerate(zip(gmm.means_, gmm.covariances_, gmm.weights_)):
+    for i, (mean, cov, weight) in enumerate(zip(gmm.means_, gmm.covariances_, gmm.weights_)):  # type: ignore
         component_pdf = (
             weight
             * (1 / np.sqrt(2 * np.pi * cov.item()))
@@ -489,15 +497,29 @@ def determine_axis_overlap(
         # Keep ax2 version of rows where ax2 wins
         ax2_matched = merged.loc[~ax1_wins, ["particle_index"] + [c for c in merged.columns if c.endswith("_ax2")]].copy()
         ax2_matched.columns = ax2.columns  # strip suffixes to match ax2
+        # add presence of other matched axis to the dataframe; if they match, it's good. if not, return false
+        ax2_best["secondary_axis"] = [None] * ax2_best.shape[0]
+        ax1_best["secondary_axis"] = [None] * ax1_best.shape[0]
+        ax2_best["secondary_axis_rotation"] = [None] * ax2_best.shape[0]
+        ax1_best["secondary_axis_rotation"] = [None] * ax1_best.shape[0]
+        # if the axis rotation exists, add it
+        ax2_matched["secondary_axis"] = [axes[0]] * ax2_matched.shape[0]
+        ax1_matched["secondary_axis"] = [axes[1]] * ax1_matched.shape[0]
+        ax1_matched["secondary_axis_rotation"] = merged.loc[ax1_wins]["original_offset_phi_ax2"].values
+        ax2_matched["secondary_axis_rotation"] = merged.loc[~ax1_wins]["original_offset_phi_ax1"].values
+        
+        # need to find a way to go back into the original dataframes, extract
+
         new_ax1 = pd.concat([
             ax1_best, ax1_matched
-        ])
+        ], join="outer")
         new_ax2 = pd.concat([
             ax2_best, ax2_matched
-        ])
-        new_ax1["best_axis"] = [axes[0]] * new_ax1.shape[0]
-        new_ax2["best_axis"] = [axes[1]] * new_ax2.shape[0]
+        ], join="outer")
+        new_ax1["primary_axis"] = [axes[0]] * new_ax1.shape[0]
+        new_ax2["primary_axis"] = [axes[1]] * new_ax2.shape[0]
         df = pd.concat([new_ax1, new_ax2])
+        df = df.rename(columns={"original_offset_phi": "primary_axis_rotation"})
         by_image[image] = df.sort_values(by="particle_index")
 
     return by_image
@@ -548,7 +570,7 @@ def match_poi_to_40S(
 
     # merge in axis + rotation_state from 40S data
     out_df = out_df.merge(
-        all_images_40S[["index_combo", "best_axis", "original_offset_phi"]],
+        all_images_40S[["index_combo", "primary_axis", "primary_axis_rotation", "secondary_axis", "secondary_axis_rotation"]],
         on="index_combo",
         how="left"   # keeps all rows in out_df
     )
@@ -577,6 +599,23 @@ def make_autopct(values: list) -> Callable:
         return '{p:.2f}% ({v:d})'.format(p=pct,v=val)
     return my_autopct
 
+def get_overlaps(
+        all_data_df: pd.DataFrame
+        ) -> tuple[set, set, set, set, set, set]:
+        """Handles the set theory and returns the index combos for different subsets"""
+        all_peaks = set(all_data_df["index_combo"])
+        all_40S = set(all_data_df[all_data_df["primary_axis"] != False]["index_combo"])
+        one_axis_40S = set(all_data_df[(all_data_df["primary_axis"] != False) & (all_data_df["secondary_axis"] == False)]["index_combo"])
+        two_axes_40S = set(all_data_df[(all_data_df["primary_axis"] != False) & (all_data_df["secondary_axis"] != False)]["index_combo"])
+        all_eEF2 = set(all_data_df[all_data_df["contains_eEF2"] != False]["index_combo"])
+        eEF2_one_axis = all_eEF2 & one_axis_40S
+        eEF2_two_axes = all_eEF2 & two_axes_40S
+        eEF2_no_40S = all_eEF2 - all_40S
+        no_eEF2_40S_one_axis = one_axis_40S - all_eEF2
+        no_eEF2_40S_two_axes = two_axes_40S - all_eEF2
+        no_nothing = all_peaks - (eEF2_one_axis | eEF2_two_axes | eEF2_no_40S | no_eEF2_40S_one_axis | no_eEF2_40S_two_axes)
+        return eEF2_one_axis, eEF2_two_axes, no_eEF2_40S_one_axis, no_eEF2_40S_two_axes, eEF2_no_40S, no_nothing
+
 def plot_overlaps(
         all_data_df: pd.DataFrame, 
         title: str
@@ -594,22 +633,31 @@ def plot_overlaps(
     --------
     None
     """
-    all_peaks = set(all_data_df["index_combo"])
-    all_40S = set(all_data_df[all_data_df["best_axis"] != False]["index_combo"])
-    all_eEF2 = set(all_data_df[all_data_df["contains_eEF2"] != False]["index_combo"])
-    eEF2_and_40S = all_eEF2 & all_40S
-    eEF2_no_40S = all_eEF2 - all_40S
-    no_eEF2_40S = all_40S - all_eEF2
-    no_nothing = all_peaks - (eEF2_and_40S | eEF2_no_40S | no_eEF2_40S)
-    colors = ["tab:blue", "tab:green", "tab:red", "lightgray"]
+    eEF2_one_axis, eEF2_two_axes, no_eEF2_40S_one_axis, no_eEF2_40S_two_axes, eEF2_no_40S, no_nothing = get_overlaps(all_data_df)
+
+    colors = [
+        "tab:blue", 
+        "teal",
+        "tab:green", 
+        "forestgreen",
+        "tab:red", 
+        "lightgray"]
 
     p = [
-        len(no_eEF2_40S),
-        len(eEF2_and_40S), 
+        len(no_eEF2_40S_one_axis),
+        len(no_eEF2_40S_two_axes),
+        len(eEF2_two_axes), 
+        len(eEF2_one_axis),
         len(eEF2_no_40S), 
         len(no_nothing)
             ]
-    labs = ["40S w/o eEF2", "eEF2 w/ 40S", "eEF2 w/o 40S","60S only"]
+    labs = [
+        "40S w/o eEF2 (1 axis)", 
+        "40S w/o eEF2 (2 axes)", 
+        "eEF2 w/ 40S (2 axes)",
+        "eEF2 w/ 40S (1 axis)", 
+        "eEF2 w/o 40S",
+        "60S only"]
     fig, ax = plt.subplots()
     ax.pie(
         p, 
@@ -622,4 +670,131 @@ def plot_overlaps(
     ax.set_title(f"eEF2 comparison pie chart for {title}", fontsize=20, fontweight='bold')
     plt.show()
 
+def create_analysis_df(all_data: pd.DataFrame) -> pd.DataFrame:
+    """Makes an analysis DataFrame so It's easier for me to work with and see in a notebook
+    
+    Parameters:
+    -----------
+    all_data: pd.DataFrame
+    DataFrame with known columns (from data analysis)
 
+    Returns:
+    --------
+    analysis_df: pd.DataFrame
+    DataFrame only containing columns relating to analysis; no orientation or location info
+
+    """
+    cols = [
+        "particle_index", 
+        "contains_eEF2", 
+        "primary_axis", 
+        "primary_axis_rotation", 
+        "secondary_axis", 
+        "secondary_axis_rotation", 
+        "index_combo"]
+    return all_data[cols].copy()
+
+def make_axis_specific_cols(
+        df: pd.DataFrame) -> None:
+    """Modifies an existing dataframe to show the rotation state of specific axes
+
+    This function assumes that there are two axes, which should be the case for these datasets
+
+    Parameters:
+    -----------
+    df: pd.DataFrame
+    The dataframe you want to be transformed to show rotation state of axes
+    title: str
+    What to title the plot
+    """
+    axes = list(set(df["primary_axis"].values))
+    out_axes = {axis: [] for axis in axes}
+    for _, row in df.iterrows():
+        prim = row["primary_axis"]
+        prim_rot = row["primary_axis_rotation"]
+        second_rot = row["secondary_axis_rotation"]
+        if prim == axes[0]:
+            out_axes[axes[0]].append(float(prim_rot))
+            out_axes[axes[1]].append(float(second_rot))
+        else:
+            out_axes[axes[1]].append(float(prim_rot))
+            out_axes[axes[0]].append(float(second_rot))
+    df[f"({axes[0][0]}, {axes[0][1]})"] = out_axes[axes[0]]
+    df[f"({axes[1][0]}, {axes[1][1]})"] = out_axes[axes[1]]
+
+def plot_heatmaps(
+        eEF2: pd.DataFrame, 
+        no_eEF2: pd.DataFrame, 
+        title2: str
+        ) -> None:
+    """Function to plot heatmaps of eEF2, and no eEF2"""
+    make_axis_specific_cols(eEF2)
+    make_axis_specific_cols(no_eEF2)
+    cols_to_take = ["(7N8B, 5JUO)", "(8CCS, 6Q8Y)"]
+    axes_label_dict = {"size": 20}
+    titledict = {"size": 25}
+    eEF2_heatmap_data = eEF2[cols_to_take].values
+    no_eEF2_heatmap_data = no_eEF2[cols_to_take].values
+    hist_eEF2, xedges, yedges = np.histogram2d(
+        x=eEF2_heatmap_data[:, 0],
+        y=eEF2_heatmap_data[:, 1], 
+        bins=8,
+        density=True
+    )
+    hist_40S, _, _ = np.histogram2d(
+        x=no_eEF2_heatmap_data[:, 0],
+        y=no_eEF2_heatmap_data[:, 1], 
+        bins=[xedges, yedges], # type: ignore
+        density=True
+    )  # type: ignore
+
+
+    diff_hist = hist_eEF2 - hist_40S
+
+
+
+    fig, axs = plt.subplots(nrows=1, ncols=3, figsize=(14, 5))
+    axs = axs.flatten()
+
+    for ax, data, title in zip(
+        axs,
+        [hist_eEF2, hist_40S, diff_hist],
+        ["eEF2", "no eEF2", "eEF2 - no eEF2"]
+    ):
+        # Create a small inset axis below the main heatmap axis
+        cbar_ax = inset_axes(ax,
+            width="120%",  # colorbar width relative to plot
+            height="10%",  # colorbar height relative to plot
+            loc="lower center",
+            borderpad=-13
+        )
+
+        hm = sns.heatmap(
+            data,
+            ax=ax,
+            xticklabels=np.round(xedges, 2),  # type: ignore
+            yticklabels=np.round(yedges, 2), # type: ignore
+            cmap="magma" if "-" not in title else "coolwarm",
+            center=0 if "Diff" in title else None,
+            cbar=True,
+            cbar_ax=cbar_ax,
+            cbar_kws={"orientation": "horizontal"}
+        )
+
+        cbar = hm.collections[0].colorbar
+        cbar.ax.tick_params(labelsize=12)
+        cbar.ax.set_title("Density", fontsize=15)
+
+        ax.set_title(title, **titledict)
+        ax.set_xlabel(f"40S rotation about\n{label_to_display(cols_to_take[0])} (˚)", **axes_label_dict)
+        ax.set_ylabel(f"40S rotation about\n{label_to_display(cols_to_take[1])} (˚)", **axes_label_dict)
+        ax.set_box_aspect(1)
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right", fontsize=12)
+        ax.set_yticklabels(ax.get_yticklabels(), rotation=360, va="center", fontsize=12)
+    fig.suptitle(
+        f"Rotation state: eEF2 vs no eEF2{title2}",
+        fontsize=35, 
+        fontweight="bold", 
+        y=1.01)
+    plt.tight_layout()
+    plt.show()
